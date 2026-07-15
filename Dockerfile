@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/playwright/python:v1.61.1-noble
+FROM mcr.microsoft.com/playwright/python:v1.61.0-noble
 
 ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /workspace

@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   agentic_accountant:
     build: .
@@ -20,9 +18,5 @@ services:
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - DRY_RUN=${DRY_RUN:-0}
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL}
-      - USER_EMAIL=${USER_EMAIL}
-      - USER_APP_PASSWORD=${USER_APP_PASSWORD}
-      - WIFE_EMAIL=${WIFE_EMAIL}
-      - WIFE_APP_PASSWORD=${WIFE_APP_PASSWORD}
       - DASHBOARD_USERNAME=${DASHBOARD_USERNAME}
       - DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD}
