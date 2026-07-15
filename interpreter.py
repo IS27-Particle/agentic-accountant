@@ -203,28 +203,62 @@ class UniversalInterfaceEngine:
                         cursor.execute("INSERT INTO family_context (key, content, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET content=excluded.content, updated_at=CURRENT_TIMESTAMP", ("AMZN_" + stable_hash(text), items))
                     db_conn.commit()
                 elif action == "imap_sync":
-                    accounts = [
-                        {"user": os.environ.get("USER_EMAIL"), "pass": os.environ.get("USER_APP_PASSWORD"), "server": "imap.gmail.com"},
-                        {"user": os.environ.get("WIFE_EMAIL"), "pass": os.environ.get("WIFE_APP_PASSWORD"), "server": "imap.gmail.com"}
-                    ]
-                    for acc in accounts:
-                        if not acc["user"] or not acc["pass"]:
-                            continue
+                    # Query all email accounts from DB
+                    cursor.execute("SELECT email_address FROM email_accounts WHERE status = 'ACTIVE'")
+                    email_rows = cursor.fetchall()
+                    emails = [row[0] for row in email_rows]
+                    
+                    if not emails:
+                        print("No active email accounts registered in database for sync.")
+                    
+                    for email_addr in emails:
                         try:
-                            mail = imaplib.IMAP4_SSL(acc["server"])
-                            mail.login(acc["user"], acc["pass"])
-                            mail.select("inbox")
-                            status, data = mail.search(None, '(OR FROM "amazon.com" FROM "noreply@target.com")')
-                            if status == "OK":
-                                for num in data[0].split()[-10:]:
-                                    status, msg_data = mail.fetch(num, "(RFC822)")
-                                    msg = email.message_from_bytes(msg_data[0][1])
-                                    subject = decode_mime_header(msg["Subject"])
-                                    cursor.execute("INSERT INTO family_context (key, content, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET content=excluded.content, updated_at=CURRENT_TIMESTAMP", ("Email_" + num.decode(), subject))
+                            print(f"Syncing emails for {email_addr} via browser session...")
+                            domain = email_addr.split("@")[-1].lower()
+                            if "gmail" in domain:
+                                mail_url = "https://mail.google.com/mail/u/0/#search/from%3Aamazon.com+OR+from%3Anoreply%40target.com"
+                            elif "outlook" in domain or "hotmail" in domain or "live" in domain:
+                                mail_url = "https://outlook.live.com/mail/0/"
+                            else:
+                                mail_url = f"https://mail.{domain}"
+                                
+                            mail_page = playwright_context.new_page()
+                            mail_page.goto(mail_url)
+                            jitter_sleep(6)
+                            
+                            # Check if login prompt is visible
+                            if "login" in mail_page.url or "signin" in mail_page.url or mail_page.locator("input[type='email']").count() > 0:
+                                print(f"Login required for mail account {email_addr}. Awaiting manual login...")
+                                handle_mfa_challenges_if_needed(mail_page, f"Email: {email_addr}", db_conn)
+                                
+                            subjects = []
+                            if "gmail" in domain:
+                                rows = mail_page.locator("tr.zA").all()
+                                for r in rows[:15]:
+                                    try:
+                                        subj_loc = r.locator("span.bog")
+                                        if subj_loc.count() > 0:
+                                            subjects.append(subj_loc.first.inner_text().strip())
+                                    except Exception:
+                                        pass
+                            elif "outlook" in domain:
+                                rows = mail_page.locator("div[role='option']").all()
+                                for r in rows[:15]:
+                                    try:
+                                        subj_loc = r.locator("span")
+                                        if subj_loc.count() > 0:
+                                            subjects.append(subj_loc.first.inner_text().strip())
+                                    except Exception:
+                                        pass
+                                        
+                            if subjects:
+                                print(f"Scraped {len(subjects)} email headers for {email_addr}.")
+                                for idx, subj in enumerate(subjects):
+                                    cursor.execute("INSERT INTO family_context (key, content, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET content=excluded.content, updated_at=CURRENT_TIMESTAMP", ("Email_" + email_addr + "_" + str(idx), subj))
                             db_conn.commit()
-                            mail.logout()
+                            mail_page.close()
                         except Exception as m_err:
-                            print("IMAP sync failed for account: " + str(acc["user"]) + " with error: " + str(m_err))
+                            print(f"Browser email sync failed for {email_addr}: {m_err}")
                 elif action == "run_reconciliation_logic":
                     cursor.execute("SELECT id, date, payee, amount FROM raw_transactions WHERE writeback_status = 'PENDING'")
                     transactions = cursor.fetchall()

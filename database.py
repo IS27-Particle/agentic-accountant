@@ -161,6 +161,27 @@ def init_db(conn=None):
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    # 14. email_accounts (dynamic multiple email configs)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS email_accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email_address TEXT UNIQUE,
+            status TEXT DEFAULT 'ACTIVE',
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # 15. budget_sites (dynamic custom budget portal target)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS budget_sites (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            site_name TEXT UNIQUE,
+            url TEXT,
+            status TEXT DEFAULT 'ACTIVE',
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     
     conn.commit()
     if should_close:

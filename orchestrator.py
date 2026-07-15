@@ -39,9 +39,19 @@ class TeeLogger:
         self.log = open(filepath, "a", encoding="utf-8")
 
     def write(self, message):
-        self.terminal.write(message)
-        self.log.write(message)
-        self.log.flush()
+        try:
+            self.terminal.write(message)
+        except Exception:
+            try:
+                enc = self.terminal.encoding or 'utf-8'
+                self.terminal.write(message.encode(enc, errors='replace').decode(enc))
+            except Exception:
+                pass
+        try:
+            self.log.write(message)
+            self.log.flush()
+        except Exception:
+            pass
 
     def flush(self):
         self.terminal.flush()
@@ -286,7 +296,15 @@ def run_pipeline():
     conn = sqlite3.connect(DB_PATH)
     database.init_db(conn)
     engine = UniversalInterfaceEngine(CONFIG_PATH)
-    order = engine.config.get("execution_order", [])
+    
+    # Dynamically retrieve execution order from active budget_sites
+    cursor = conn.cursor()
+    cursor.execute("SELECT site_name FROM budget_sites WHERE status = 'ACTIVE'")
+    active_rows = cursor.fetchall()
+    if active_rows:
+        order = [row[0] for row in active_rows]
+    else:
+        order = engine.config.get("execution_order", [])
     
     with sync_playwright() as p:
         is_headless = os.getenv("HEADLESS", "0") == "1" or (not os.getenv("DISPLAY") and os.name != 'nt')

@@ -107,6 +107,12 @@ def dashboard():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
+    # Redirect to setup wizard if no budget portals are registered
+    cursor.execute("SELECT COUNT(*) FROM budget_sites")
+    if cursor.fetchone()[0] == 0:
+        conn.close()
+        return RedirectResponse(url="/setup", status_code=307)
+    
     # Fetch latest report
     cursor.execute("SELECT report_content, timestamp FROM daily_reports ORDER BY id DESC LIMIT 1")
     latest_report = cursor.fetchone()
@@ -137,6 +143,10 @@ def dashboard():
     # Pending MFA challenges
     cursor.execute("SELECT id, site_name FROM mfa_challenges WHERE status = 'PENDING'")
     pending_mfa = cursor.fetchall()
+    
+    # Connected budget portals
+    cursor.execute("SELECT site_name, url FROM budget_sites WHERE status = 'ACTIVE'")
+    active_portals = cursor.fetchall()
     
     conn.close()
     
@@ -663,6 +673,29 @@ def dashboard():
                     </form>
                 </div>
 
+                <!-- Connected Portals -->
+                <div class="section-card">
+                    <h2>Connected Portals</h2>
+                    <div style="display: flex; flex-direction: column; gap: 10px;">"""
+    for p_name, p_url in active_portals:
+        display_name = p_name.replace("_sync", "").replace("_", " ").title()
+        html += f"""
+                        <div style="padding: 10px; background: rgba(255,255,255,0.02); border: 1px solid var(--border-color); border-radius: 8px; display: flex; justify-content: space-between; align-items: center;">
+                            <div>
+                                <strong style="color: var(--accent-purple); font-size: 0.95rem;">{display_name}</strong>
+                                <div style="font-size: 0.8rem; color: var(--text-secondary); margin-top: 2px; font-family: monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 180px;">{p_url}</div>
+                            </div>
+                            <span class="status-badge" style="padding: 2px 8px; font-size: 0.75rem; background: rgba(16, 185, 129, 0.2); color: #34d399; border-radius: 4px; border: 1px solid rgba(16, 185, 129, 0.3);">Active</span>
+                        </div>"""
+    if not active_portals:
+        html += "<p class='no-records'>No active portals connected.</p>"
+    html += """
+                    </div>
+                    <div style="margin-top: 15px; text-align: center;">
+                        <a href="/setup" style="font-size: 0.9rem; color: var(--accent-purple); text-decoration: none; font-weight: 600;">Manage Portals & Emails →</a>
+                    </div>
+                </div>
+
                 <!-- Active Mapping Rules -->
                 <div class="section-card">
                     <h2 style="display: flex; justify-content: space-between; align-items: center;"><span>Active Mapping Rules</span><a href="/export/rules" style="font-size: 0.9rem; color: #10b981; text-decoration: none;">Download CSV</a></h2>
@@ -851,3 +884,395 @@ def export_rules():
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=mapping_rules_export.csv"}
     )
+
+@app.get("/setup", response_class=HTMLResponse)
+def setup_wizard():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT site_name, url FROM budget_sites")
+    sites = cursor.fetchall()
+    cursor.execute("SELECT email_address FROM email_accounts")
+    emails = cursor.fetchall()
+    conn.close()
+    
+    html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agentic Accountant Setup Wizard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0b0f19;
+            --card-bg: rgba(17, 24, 39, 0.7);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --text-primary: #f3f4f6;
+            --text-secondary: #9ca3af;
+            --accent-purple: #8b5cf6;
+            --accent-emerald: #10b981;
+            --accent-rose: #f43f5e;
+            --accent-blue: #3b82f6;
+            --glass-shine: rgba(255, 255, 255, 0.03);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Outfit', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            min-height: 100vh;
+            padding: 40px 20px;
+            background-image: 
+                radial-gradient(circle at 10% 20%, rgba(139, 92, 246, 0.05) 0%, transparent 40%),
+                radial-gradient(circle at 90% 80%, rgba(59, 130, 246, 0.05) 0%, transparent 40%);
+            background-attachment: fixed;
+        }
+        
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        
+        header {
+            margin-bottom: 40px;
+            text-align: center;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 20px;
+        }
+        
+        h1 {
+            font-size: 2.5rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, #a78bfa 0%, #60a5fa 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            display: inline-block;
+        }
+        
+        .setup-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 30px;
+            margin-bottom: 30px;
+            backdrop-filter: blur(12px);
+        }
+        
+        h2 {
+            font-size: 1.5rem;
+            margin-bottom: 20px;
+            color: var(--accent-purple);
+        }
+        
+        .form-group {
+            margin-bottom: 20px;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+            font-weight: 600;
+        }
+        
+        input[type="text"], input[type="email"] {
+            width: 100%;
+            padding: 12px 16px;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            background: rgba(31, 41, 55, 0.5);
+            color: white;
+            font-size: 1rem;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        
+        input:focus {
+            border-color: var(--accent-purple);
+        }
+        
+        button {
+            background: var(--accent-purple);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        button:hover {
+            opacity: 0.9;
+            transform: translateY(-1px);
+        }
+        
+        .list-items {
+            margin-top: 20px;
+            border-top: 1px solid var(--border-color);
+            padding-top: 20px;
+        }
+        
+        .list-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px;
+            background: rgba(255, 255, 255, 0.02);
+            border-radius: 8px;
+            margin-bottom: 10px;
+            border: 1px solid var(--border-color);
+        }
+        
+        .list-item-name {
+            font-weight: 600;
+        }
+        
+        .list-item-sub {
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+            font-family: 'JetBrains Mono', monospace;
+        }
+        
+        .btn-delete {
+            color: var(--accent-rose);
+            text-decoration: none;
+            font-weight: 600;
+            font-size: 0.9rem;
+        }
+        
+        .alert-info {
+            background: rgba(59, 130, 246, 0.1);
+            border: 1px solid rgba(59, 130, 246, 0.2);
+            color: #93c5fd;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            font-size: 0.95rem;
+            line-height: 1.5;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Setup Wizard</h1>
+            <p style="color: var(--text-secondary); margin-top: 8px;">Configure your budget portal and secure email sessions</p>
+        </header>
+        
+        <!-- Step 1: Budget Portal -->
+        <div class="setup-card">
+            <h2>Step 1: Configure Budget Portal</h2>
+            <form action="/setup/budget" method="post">
+                <div class="form-group">
+                    <label>Software Name</label>
+                    <input type="text" name="site_name" placeholder="e.g. Monarch Money, YNAB, Quicken Simplifi" required />
+                </div>
+                <div class="form-group">
+                    <label>Portal Login URL</label>
+                    <input type="text" name="url" placeholder="https://..." required />
+                </div>
+                <button type="submit">Save Budget Portal</button>
+            </form>
+            
+            <div class="list-items">
+                <strong>Configured Portals:</strong>
+                """
+    if not sites:
+        html += "<p class='no-records' style='margin-top: 10px;'>No portals configured yet.</p>"
+    else:
+        for s_name, s_url in sites:
+            html += f"""
+                <div class="list-item">
+                    <div>
+                        <div class="list-item-name">{s_name}</div>
+                        <div class="list-item-sub">{s_url}</div>
+                    </div>
+                    <a href="/setup/delete-budget?site_name={s_name}" class="btn-delete">Delete</a>
+                </div>
+            """
+            
+    html += """
+            </div>
+        </div>
+        
+        <!-- Step 2: Email Accounts -->
+        <div class="setup-card">
+            <h2>Step 2: Add Email Accounts (No App Passwords Required)</h2>
+            <form action="/setup/email" method="post">
+                <div class="form-group">
+                    <label>Email Address</label>
+                    <input type="email" name="email_address" placeholder="e.g. user@gmail.com" required />
+                </div>
+                <button type="submit">Add Email Account</button>
+            </form>
+            
+            <div class="list-items">
+                <strong>Registered Emails:</strong>
+                """
+    if not emails:
+        html += "<p class='no-records' style='margin-top: 10px;'>No email accounts registered yet.</p>"
+    else:
+        for (e_addr,) in emails:
+            html += f"""
+                <div class="list-item">
+                    <span class="list-item-name">{e_addr}</span>
+                    <a href="/setup/delete-email?email_address={e_addr}" class="btn-delete">Delete</a>
+                </div>
+            """
+            
+    html += """
+            </div>
+        </div>
+        
+        <!-- Step 3: Interactive Login -->
+        <div class="setup-card" style="border-color: var(--accent-emerald);">
+            <h2 style="color: var(--accent-emerald);">Step 3: Establish Secure Session Cookies</h2>
+            <div class="alert-info">
+                The Setup Wizard will launch Chromium in headed mode on your machine. 
+                Log in to each budget portal and email service tab manually. Playwright will store the session cookies locally. 
+                Once logged in, close the browser window to complete setup. Plaintext passwords are never saved.
+            </div>
+            <form action="/setup/launch-auth" method="post">
+                <button type="submit" style="background: var(--accent-emerald); width: 100%; padding: 15px; font-size: 1.1rem;">Launch Secure Authentication Browser</button>
+            </form>
+            
+            <div style="margin-top: 20px; text-align: center;">
+                <a href="/" style="color: var(--text-secondary); text-decoration: none; font-weight: 600;">Go to Dashboard →</a>
+            </div>
+        </div>
+    </div>
+</body>
+</html>"""
+    return html
+
+@app.post("/setup/budget")
+def setup_budget(site_name: str = Form(...), url: str = Form(...)):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    try:
+        # Normalize target key name
+        normalized_key = site_name.lower().replace(" ", "_") + "_sync"
+        cursor.execute("INSERT INTO budget_sites (site_name, url) VALUES (?, ?)", (normalized_key, url))
+        conn.commit()
+        
+        # Read modules_config.json and insert config profile if not exists
+        import json
+        config_path = "modules_config.json"
+        if os.path.exists("/workspace/modules_config.json"):
+            config_path = "/workspace/modules_config.json"
+            
+        if os.path.exists(config_path):
+            with open(config_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            
+            if normalized_key not in cfg:
+                cfg[normalized_key] = {
+                    "steps": [
+                        {"action": "goto", "url": url},
+                        {"action": "wait_for_selector", "selector": "table, .transactions, .ledger"},
+                        {"action": "scrape_transactions", "row_selector": "tr, .transaction-row", "columns": {"date": "td.date", "payee": "td.payee", "amount": "td.amount", "category": "td.category", "account": "td.account"}},
+                        {"action": "imap_sync"},
+                        {"action": "run_reconciliation_logic"}
+                    ]
+                }
+                if "execution_order" in cfg:
+                    if normalized_key not in cfg["execution_order"]:
+                        cfg["execution_order"].append(normalized_key)
+                else:
+                    cfg["execution_order"] = [normalized_key]
+                    
+                with open(config_path, "w", encoding="utf-8") as f:
+                    json.dump(cfg, f, indent=2)
+    except Exception as e:
+        print(f"Error saving budget portal: {e}")
+    finally:
+        conn.close()
+    return RedirectResponse(url="/setup", status_code=303)
+
+@app.post("/setup/email")
+def setup_email(email_address: str = Form(...)):
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("INSERT INTO email_accounts (email_address) VALUES (?)", (email_address,))
+        conn.commit()
+    except Exception as e:
+        print(f"Error saving email account: {e}")
+    finally:
+        conn.close()
+    return RedirectResponse(url="/setup", status_code=303)
+
+@app.get("/setup/delete-budget")
+def delete_budget(site_name: str):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM budget_sites WHERE site_name = ?", (site_name,))
+    conn.commit()
+    conn.close()
+    return RedirectResponse(url="/setup", status_code=303)
+
+@app.get("/setup/delete-email")
+def delete_email(email_address: str):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM email_accounts WHERE email_address = ?", (email_address,))
+    conn.commit()
+    conn.close()
+    return RedirectResponse(url="/setup", status_code=303)
+
+@app.post("/setup/launch-auth")
+def launch_auth(request: Request):
+    from playwright.sync_api import sync_playwright
+    import threading
+    
+    def run_auth_browser():
+        with sync_playwright() as p:
+            is_headless = False
+            browser = p.chromium.launch_persistent_context(
+                user_data_dir="/workspace/user_session_data" if os.path.exists("/workspace") else "user_session_data",
+                headless=is_headless,
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                viewport={"width": 1440, "height": 900},
+                args=["--no-sandbox", "--disable-setuid-sandbox"]
+            )
+            
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute("SELECT url FROM budget_sites")
+            site_urls = [row[0] for row in cursor.fetchall()]
+            cursor.execute("SELECT email_address FROM email_accounts")
+            emails = [row[0] for row in cursor.fetchall()]
+            conn.close()
+            
+            for url in site_urls:
+                page = browser.new_page()
+                page.goto(url)
+                
+            for email_addr in emails:
+                domain = email_addr.split("@")[-1].lower()
+                if "gmail" in domain:
+                    mail_url = "https://mail.google.com/mail/"
+                elif "outlook" in domain or "hotmail" in domain or "live" in domain:
+                    mail_url = "https://outlook.live.com/mail/"
+                else:
+                    mail_url = f"https://mail.{domain}"
+                page = browser.new_page()
+                page.goto(mail_url)
+                
+            try:
+                while len(browser.pages) > 0:
+                    time.sleep(1)
+            except Exception:
+                pass
+            browser.close()
+            
+    threading.Thread(target=run_auth_browser, daemon=True).start()
+    return RedirectResponse(url="/setup", status_code=303)

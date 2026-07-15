@@ -379,6 +379,10 @@ class TestWebApp(unittest.TestCase):
             os.remove(TEMP_DB)
         database.init_db()
         self.conn = sqlite3.connect(TEMP_DB)
+        # Seed an active budget site so dashboard renders instead of redirecting
+        cursor = self.conn.cursor()
+        cursor.execute("INSERT INTO budget_sites (site_name, url) VALUES ('quicken_simplifi_sync', 'https://simplifi.quicken.com')")
+        self.conn.commit()
 
     def tearDown(self):
         self.conn.close()
@@ -633,6 +637,58 @@ class TestWebApp(unittest.TestCase):
         # Verify FreshBank challenge is still PENDING
         cursor.execute("SELECT status FROM mfa_challenges WHERE site_name = 'FreshBank'")
         self.assertEqual(cursor.fetchone()[0], 'PENDING')
+
+    def test_setup_wizard_flow(self):
+        # Delete the seeded budget sites first to trigger setup flow redirect
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM budget_sites")
+        self.conn.commit()
+        
+        # 1. Access dashboard without config - should redirect to /setup
+        dash_resp = web_app.dashboard()
+        self.assertEqual(dash_resp.status_code, 307)
+        self.assertEqual(dash_resp.headers["location"], "/setup")
+        
+        # 2. Get /setup page
+        setup_html = web_app.setup_wizard()
+        self.assertIn("Setup Wizard", setup_html)
+        self.assertIn("Step 1: Configure Budget Portal", setup_html)
+        self.assertIn("Step 2: Add Email Accounts", setup_html)
+        
+        # 3. Post a new budget site
+        budget_resp = web_app.setup_budget(site_name="Monarch Money", url="https://app.monarchmoney.com/login")
+        self.assertEqual(budget_resp.status_code, 303)
+        
+        # Verify saved in DB
+        cursor.execute("SELECT site_name, url FROM budget_sites WHERE url = 'https://app.monarchmoney.com/login'")
+        row = cursor.fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row[0], "monarch_money_sync")
+        
+        # 4. Post a new email profile
+        email_resp = web_app.setup_email(email_address="testuser@gmail.com")
+        self.assertEqual(email_resp.status_code, 303)
+        
+        # Verify saved in DB
+        cursor.execute("SELECT email_address FROM email_accounts WHERE email_address = 'testuser@gmail.com'")
+        self.assertIsNotNone(cursor.fetchone())
+        
+        # 5. Access dashboard again - now that a site exists, it shouldn't redirect
+        dash_ok_html = web_app.dashboard()
+        self.assertIn("Agentic Accountant", dash_ok_html)
+        self.assertIn("Monarch Money", dash_ok_html)
+        
+        # 6. Delete budget and email
+        del_b_resp = web_app.delete_budget(site_name="monarch_money_sync")
+        self.assertEqual(del_b_resp.status_code, 303)
+        del_e_resp = web_app.delete_email(email_address="testuser@gmail.com")
+        self.assertEqual(del_e_resp.status_code, 303)
+        
+        # Verify deleted in DB
+        cursor.execute("SELECT COUNT(*) FROM budget_sites")
+        self.assertEqual(cursor.fetchone()[0], 0)
+        cursor.execute("SELECT COUNT(*) FROM email_accounts")
+        self.assertEqual(cursor.fetchone()[0], 0)
 
 
 if __name__ == "__main__":
