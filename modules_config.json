@@ -1,0 +1,121 @@
+{
+  "execution_order": [
+    "quicken_simplifi_sync",
+    "google_keep_sync",
+    "forma_hsa_sync",
+    "digital_receipts_sync",
+    "gemini_reconciliation_engine",
+    "quicken_bill_manager"
+  ],
+  "quicken_simplifi_sync": {
+    "steps": [
+      {
+        "action": "goto",
+        "url": "https://simplifi.quicken.com/transactions"
+      },
+      {
+        "action": "wait_for_selector",
+        "selector": ".transaction-row",
+        "timeout": 60000
+      },
+      {
+        "action": "scrape_transactions",
+        "row_selector": ".transaction-row",
+        "columns": {
+          "date": ".date-column",
+          "payee": ".payee-column",
+          "amount": ".amount-column",
+          "category": ".category-column",
+          "account": ".account-column"
+        }
+      }
+    ]
+  },
+  "google_keep_sync": {
+    "steps": [
+      {
+        "action": "goto",
+        "url": "https://keep.google.com/"
+      },
+      {
+        "action": "wait_for_selector",
+        "selector": "[role='note']",
+        "timeout": 30000
+      },
+      {
+        "action": "scrape_notes",
+        "note_selector": "[role='note']",
+        "title_selector": "[aria-label='Title']",
+        "content_selector": "[aria-label='Note text']",
+        "checkbox_selector": "[role='checkbox']"
+      }
+    ]
+  },
+  "forma_hsa_sync": {
+    "steps": [
+      {
+        "action": "goto",
+        "url": "https://joinforma.com/"
+      },
+      {
+        "action": "wait_for_selector",
+        "selector": "[data-testid='benefit-card']",
+        "timeout": 60000
+      },
+      {
+        "action": "scrape_benefits",
+        "card_selector": "[data-testid='benefit-card']",
+        "title_selector": "[data-testid='benefit-title']",
+        "balance_selector": "[data-testid='benefit-balance']"
+      }
+    ]
+  },
+  "digital_receipts_sync": {
+    "steps": [
+      {
+        "action": "goto",
+        "url": "https://www.amazon.com/gp/css/order-history"
+      },
+      {
+        "action": "wait_for_selector",
+        "selector": ".order-card",
+        "timeout": 30000
+      },
+      {
+        "action": "scrape_amazon",
+        "card_selector": ".order-card",
+        "link_selector": ".a-link-normal"
+      },
+      {
+        "action": "imap_sync"
+      }
+    ]
+  },
+  "gemini_reconciliation_engine": {
+    "steps": [
+      {
+        "action": "run_reconciliation_logic",
+        "writeback_url": "https://simplifi.quicken.com/transactions",
+        "row_selector": ".transaction-row",
+        "icon_sub_selector": ".reviewed-status-icon",
+        "active_class_marker": "is-reviewed"
+      }
+    ]
+  },
+  "quicken_bill_manager": {
+    "steps": [
+      {
+        "action": "run_bill_linking_logic",
+        "url": "https://simplifi.quicken.com/bills",
+        "bill_selector": ".bill-reminder-item",
+        "biller_selector": ".biller-name-text",
+        "amount_selector": ".bill-amount-text",
+        "options_selector": ".options-menu-trigger",
+        "link_option_selector": "text=Link to Transaction",
+        "search_input_selector": "input[placeholder='Search transactions...']",
+        "confirm_button_selector": "button:has-text('Confirm Link')",
+        "cancel_button_selector": "button:has-text('Cancel')"
+      }
+    ]
+  }
+}

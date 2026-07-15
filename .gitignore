@@ -1,0 +1,27 @@
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+env/
+venv/
+ENV/
+
+# --- Environment & Configuration Secrets ---
+.env
+.env.local
+.env.*.local
+
+# --- Local Databases & Database Files ---
+*.db
+*.db-journal
+*.sqlite3
+
+# --- Logging & Temp Files ---
+*.log
+*.bak
+user_session_data/
+.pytest_cache/
+.coverage
+htmlcov/

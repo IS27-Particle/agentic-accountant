@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  agentic_accountant:
+    build: .
+    container_name: gemini-finance-agent
+    restart: unless-stopped
+    ports:
+      - "6080:6080"
+      - "8080:8080"
+    volumes:
+      - ./user_session_data:/workspace/user_session_data
+      - ./downloads:/workspace/downloads
+      - ./modules_config.json:/workspace/modules_config.json
+      - ./interpreter.py:/workspace/interpreter.py
+      - ./orchestrator.py:/workspace/orchestrator.py
+      - ./web_app.py:/workspace/web_app.py
+      - ./database.py:/workspace/database.py
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - DRY_RUN=${DRY_RUN:-0}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL}
+      - USER_EMAIL=${USER_EMAIL}
+      - USER_APP_PASSWORD=${USER_APP_PASSWORD}
+      - WIFE_EMAIL=${WIFE_EMAIL}
+      - WIFE_APP_PASSWORD=${WIFE_APP_PASSWORD}
+      - DASHBOARD_USERNAME=${DASHBOARD_USERNAME}
+      - DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD}
