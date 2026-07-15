@@ -3,7 +3,9 @@ FROM mcr.microsoft.com/playwright/python:v1.61.0-noble
 ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /workspace
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y software-properties-common \
+    && add-apt-repository -y universe \
+    && apt-get update && apt-get install -y \
     xvfb \
     x11vnc \
     novnc \
