@@ -691,5 +691,157 @@ class TestWebApp(unittest.TestCase):
         self.assertEqual(cursor.fetchone()[0], 0)
 
 
+import validation
+
+class TestValidationAndViewer(unittest.TestCase):
+    def setUp(self):
+        if os.path.exists(TEMP_DB):
+            os.remove(TEMP_DB)
+        database.init_db()
+        self.conn = sqlite3.connect(TEMP_DB)
+        # Seed an active budget site
+        cursor = self.conn.cursor()
+        cursor.execute("INSERT INTO budget_sites (site_name, url) VALUES ('quicken_simplifi_sync', 'https://simplifi.quicken.com')")
+        self.conn.commit()
+
+    def tearDown(self):
+        self.conn.close()
+        if os.path.exists(TEMP_DB):
+            try:
+                os.remove(TEMP_DB)
+            except OSError:
+                pass
+
+    def test_validation_filtering_and_classification(self):
+        cursor = self.conn.cursor()
+        # Seed raw transactions (some cleared, some pending, some One Main)
+        cursor.execute("INSERT INTO raw_transactions (id, payee, amount, category, account, cleared) VALUES ('tx_c_1', 'Netflix', -15.99, 'Utilities', 'Credit Card', 'CLEARED')")
+        cursor.execute("INSERT INTO raw_transactions (id, payee, amount, category, account, cleared) VALUES ('tx_c_2', 'Zelle Payment', 50.00, 'Income', 'Checking', 'PENDING')")
+        cursor.execute("INSERT INTO raw_transactions (id, payee, amount, category, account, cleared) VALUES ('tx_c_3', 'One Main Interest', -100.00, 'Loan Payment', 'One Main Account', 'PENDING')")
+        self.conn.commit()
+
+        eligible = validation.get_eligible_transactions(self.conn)
+        ids = [t['id'] for t in eligible]
+        self.assertIn('tx_c_1', ids)
+        self.assertNotIn('tx_c_2', ids)
+        self.assertIn('tx_c_3', ids) # One Main is allowed immediate validation even if pending (1.1)
+
+        # Classification check
+        tx1 = [t for t in eligible if t['id'] == 'tx_c_1'][0]
+        tx3 = [t for t in eligible if t['id'] == 'tx_c_3'][0]
+        self.assertEqual(validation.classify_transaction(tx1, self.conn), ['Bill/Subscription'])
+        self.assertEqual(validation.classify_transaction(tx3, self.conn), ['Expense'])
+
+    def test_validation_handlers(self):
+        cursor = self.conn.cursor()
+        # 1. Bill Adjustment check (fluctuating amount)
+        cursor.execute("INSERT INTO permanent_mapping_rules (keyword_pattern, target_category, target_bill_name) VALUES ('Netflix', 'Utilities', 'Netflix Series')")
+        cursor.execute("INSERT INTO raw_transactions (id, date, payee, amount, category, account, cleared) VALUES ('tx_h_1', '2026-07-01', 'Netflix', -15.99, 'Utilities', 'Credit Card', 'CLEARED')")
+        cursor.execute("INSERT INTO raw_transactions (id, date, payee, amount, category, account, cleared) VALUES ('tx_h_2', '2026-07-15', 'Netflix', -25.99, 'Utilities', 'Credit Card', 'CLEARED')")
+        self.conn.commit()
+
+        validation.run_validation_pipeline(self.conn)
+
+        # Check that a task was queued
+        cursor.execute("SELECT category, transaction_id, status FROM task_queue WHERE transaction_id = 'tx_h_2'")
+        task = cursor.fetchone()
+        self.assertIsNotNone(task)
+        self.assertEqual(task[0], "Bill Adjustment")
+
+    def test_db_viewer_apis(self):
+        # Test databases list
+        db_list = web_app.db_viewer_databases()
+        self.assertIsInstance(db_list, list)
+
+        # Test tables list
+        tables = web_app.db_viewer_tables(os.path.basename(TEMP_DB))
+        self.assertIn("raw_transactions", tables)
+
+        # Test data retrieve
+        data = web_app.db_viewer_data(os.path.basename(TEMP_DB), "raw_transactions")
+        self.assertIn("columns", data)
+        self.assertIn("rows", data)
+
+        # Test add row
+        add_resp = web_app.db_viewer_add(
+            db=os.path.basename(TEMP_DB),
+            table="raw_transactions",
+            row_data=json.dumps({"id": "tx_viewer_add", "payee": "Viewer Add", "amount": -10.0, "cleared": "CLEARED"})
+        )
+        self.assertEqual(add_resp, {"status": "success"})
+
+        # Verify added
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT payee FROM raw_transactions WHERE id = 'tx_viewer_add'")
+        self.assertEqual(cursor.fetchone()[0], "Viewer Add")
+
+        # Test edit cell with validation
+        edit_resp = web_app.db_viewer_edit(
+            db=os.path.basename(TEMP_DB),
+            table="raw_transactions",
+            pk_col="id",
+            pk_val="tx_viewer_add",
+            col="amount",
+            val="-15.50"
+        )
+        self.assertEqual(edit_resp, {"status": "success"})
+        cursor.execute("SELECT amount FROM raw_transactions WHERE id = 'tx_viewer_add'")
+        self.assertEqual(cursor.fetchone()[0], -15.50)
+
+        # Test invalid type validation
+        from fastapi import HTTPException
+        with self.assertRaises(HTTPException) as ctx:
+            web_app.db_viewer_edit(
+                db=os.path.basename(TEMP_DB),
+                table="raw_transactions",
+                pk_col="id",
+                pk_val="tx_viewer_add",
+                col="amount",
+                val="invalid_float"
+            )
+        self.assertEqual(ctx.exception.status_code, 400)
+
+        # Test delete row
+        del_resp = web_app.db_viewer_delete(
+            db=os.path.basename(TEMP_DB),
+            table="raw_transactions",
+            pk_col="id",
+            pk_val="tx_viewer_add"
+        )
+        self.assertEqual(del_resp, {"status": "success"})
+        cursor.execute("SELECT COUNT(*) FROM raw_transactions WHERE id = 'tx_viewer_add'")
+        self.assertEqual(cursor.fetchone()[0], 0)
+
+    def test_task_action_endpoint(self):
+        cursor = self.conn.cursor()
+        # Seed raw transaction and pending task
+        cursor.execute("INSERT INTO raw_transactions (id, payee, amount, category, account, cleared) VALUES ('tx_t_1', 'Netflix', -15.99, 'Uncategorized', 'Credit Card', 'CLEARED')")
+        cursor.execute("""
+            INSERT INTO task_queue (category, transaction_id, details, explanation, accept_changes, reject_changes, status)
+            VALUES ('Bill Attachment', 'tx_t_1', '{}', 'Test Explanation', 'Link Netflix', 'Reject Netflix', 'PENDING')
+        """)
+        self.conn.commit()
+        cursor.execute("SELECT id FROM task_queue WHERE transaction_id = 'tx_t_1'")
+        task_id = cursor.fetchone()[0]
+
+        # Call POST /task-action
+        resp = web_app.handle_task_action(task_id=task_id, action="approve")
+        self.assertEqual(resp.status_code, 303)
+
+        # Verify task is APPROVED and writeback_status updated
+        cursor.execute("SELECT status FROM task_queue WHERE id = ?", (task_id,))
+        self.assertEqual(cursor.fetchone()[0], "APPROVED")
+
+        cursor.execute("SELECT writeback_status FROM raw_transactions WHERE id = 'tx_t_1'")
+        self.assertEqual(cursor.fetchone()[0], "SUCCESS")
+
+        # Verify change audit was logged
+        cursor.execute("SELECT change_type, target_app FROM change_audit WHERE task_id = ?", (task_id,))
+        audit = cursor.fetchone()
+        self.assertIsNotNone(audit)
+        self.assertEqual(audit[0], "BILL_ATTACH")
+        self.assertEqual(audit[1], "Quicken Simplifi")
+
+
 if __name__ == "__main__":
     unittest.main()

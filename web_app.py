@@ -99,8 +99,12 @@ def command_worker_loop():
             print(f"Background worker loop exception: {ex}")
         time.sleep(5)
 
+import sys
+import json
+
 # Start background command polling loop
-threading.Thread(target=command_worker_loop, daemon=True).start()
+if "unittest" not in sys.modules and "pytest" not in sys.modules and "test_accounting" not in "".join(sys.argv):
+    threading.Thread(target=command_worker_loop, daemon=True).start()
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
@@ -117,9 +121,13 @@ def dashboard():
     cursor.execute("SELECT report_content, timestamp FROM daily_reports ORDER BY id DESC LIMIT 1")
     latest_report = cursor.fetchone()
     
-    # Fetch review queue items
-    cursor.execute("SELECT transaction_id, date, payee, amount, loop_state, proposed_rule FROM review_queue WHERE loop_state != 'APPROVED'")
-    items = cursor.fetchall()
+    # Fetch pending tasks
+    cursor.execute("SELECT id, category, transaction_id, details, explanation, accept_changes, reject_changes FROM task_queue WHERE status = 'PENDING'")
+    tasks = cursor.fetchall()
+    
+    # Fetch pending review_queue exceptions
+    cursor.execute("SELECT transaction_id, date, payee, amount, user_input, proposed_rule, loop_state FROM review_queue WHERE loop_state != 'APPROVED'")
+    review_items = cursor.fetchall()
     
     # Fetch permanent rules
     cursor.execute("SELECT id, keyword_pattern, target_category, target_bill_name FROM permanent_mapping_rules")
@@ -128,9 +136,9 @@ def dashboard():
     # Stats
     cursor.execute("SELECT COUNT(*) FROM raw_transactions")
     total_tx = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM review_queue WHERE loop_state = 'APPROVED'")
+    cursor.execute("SELECT COUNT(*) FROM task_queue WHERE status = 'APPROVED'")
     reconciled_tx = cursor.fetchone()[0]
-    pending_tx = len(items)
+    pending_tx = len(tasks) + len(review_items)
     
     # Prune expired MFA challenges (older than 5 minutes)
     cursor.execute("""
@@ -569,6 +577,7 @@ def dashboard():
             <div>
                 <h1>Agentic Accountant</h1>
                 <p style="color: var(--text-secondary); font-size: 1.1rem; margin-top: 4px;">Declarative Financial Reconciliation Engine</p>
+                <a href="/db-viewer" style="color: var(--accent-purple); text-decoration: none; font-weight: 600; font-size: 1.05rem; margin-top: 8px; display: inline-flex; align-items: center; gap: 6px;">📁 Live Table Viewer →</a>
             </div>
             <div class="status-badge">
                 <span class="status-dot"></span> System Live & Monitoring
@@ -627,37 +636,88 @@ def dashboard():
                 <div class="section-card">
                     <h2>Reconciliation Exception Queue</h2>"""
     
-    if not items:
-        html += "<p class='no-records' style='color: var(--accent-emerald); font-weight: 600;'>✓ All transactions mapped and reconciled.</p>"
+    if not tasks and not review_items:
+        html += "<p class='no-records' style='color: var(--accent-emerald); font-weight: 600;'>✓ All task queue items resolved.</p>"
     else:
-        for tx_id, dt, py, am, state, prop_rule in items:
-            state_label = "Rule Proposed" if state == "RULE_PROPOSED" else ("Rejected" if state == "REJECTED" else "Pending Input")
-            state_class = "proposed" if state == "RULE_PROPOSED" else ("rejected" if state == "REJECTED" else "")
-            
-            html += "<div class='queue-item'>"
-            html += "  <div class='queue-header'>"
-            html += "    <div class='queue-meta'>"
-            html += "      <span class='tx-payee'>" + str(py) + "</span>"
-            html += "      <span class='tx-amount'>$" + f"{am:.2f}" + "</span>"
-            html += "      <span class='tx-date'>" + str(dt) + "</span>"
-            html += "    </div>"
-            html += "    <span class='badge-state " + state_class + "'>" + state_label + "</span>"
-            html += "  </div>"
-            
-            if state in ("PENDING_INPUT", "REJECTED"):
-                placeholder_text = "Provide context to re-draft this rule..." if state == "REJECTED" else "Provide context for this transaction (e.g., business lunch, office supplies)..."
-                html += "  <form action='/submit-input' method='post'>"
-                html += "    <input type='hidden' name='tx_id' value='" + str(tx_id) + "'/>"
-                html += "    <input type='text' name='user_text' placeholder='" + placeholder_text + "' required/>"
-                html += "    <button type='submit'>Submit Context</button>"
-                html += "  </form>"
-            elif state == "RULE_PROPOSED":
-                html += "  <div class='proposed-rule-box'>" + str(prop_rule) + "</div>"
-                html += "  <div class='action-buttons'>"
-                html += "    <a href='/action-rule?tx_id=" + str(tx_id) + "&action=approve' class='btn-action approve'>Approve & Writeback</a>"
-                html += "    <a href='/action-rule?tx_id=" + str(tx_id) + "&action=reject' class='btn-action reject'>Reject & Redraft</a>"
-                html += "  </div>"
+        # Render review_items (legacy)
+        for tx_id, dt, payee, amount, user_input, proposed_rule, loop_state in review_items:
+            state_label = "Pending Input" if loop_state == "PENDING_INPUT" else ("Rule Proposed" if loop_state == "RULE_PROPOSED" else "Rejected")
+            html += f"""
+            <div class='queue-item'>
+                <div class='queue-header'>
+                    <span class='tx-payee' style='color: var(--accent-purple); font-size: 1.1rem;'>{payee}</span>
+                    <span class='badge-state proposed'>{state_label}</span>
+                </div>
+                <div style='margin-bottom: 12px; font-size: 0.95rem; color: #d1d5db;'>Date: {dt} | Amount: ${amount:.2f}</div>
+            """
+            if loop_state in ("PENDING_INPUT", "REJECTED"):
+                placeholder = "Provide context to re-draft this rule..." if loop_state == "REJECTED" else "Provide context..."
+                html += f"""
+                <form action='/submit-input' method='post' style="display: inline-flex; gap: 10px; width: auto; align-items: center;">
+                    <input type="hidden" name="tx_id" value="{tx_id}" />
+                    <input type="text" name="user_text" placeholder="{placeholder}" required style="padding: 6px 12px; font-size:0.9rem; border-radius: 6px; width: 200px; background:#111827; border: 1px solid var(--border-color); color:white;" />
+                    <button type="submit" class="btn-action approve" style="padding: 6px 16px; font-size: 0.85rem; border: none; cursor: pointer;">Submit context</button>
+                </form>
+                """
+            elif loop_state == "RULE_PROPOSED":
+                html += f"""
+                <div class='proposed-rule-box' style='font-size:0.85rem; border-left: 3px solid var(--accent-emerald); background: rgba(16, 185, 129, 0.05); margin-bottom:15px; color:#34d399;'>
+                    <strong>Proposed rule:</strong> {proposed_rule}
+                </div>
+                <div style="display: flex; gap: 10px;">
+                    <a href="/action-rule?tx_id={tx_id}&action=approve" class="btn-action approve" style="text-decoration: none; padding: 6px 16px; font-size: 0.85rem; border-radius: 6px; text-align: center; display: inline-block;">Approve</a>
+                    <a href="/action-rule?tx_id={tx_id}&action=reject" class="btn-action reject" style="text-decoration: none; padding: 6px 16px; font-size: 0.85rem; border-radius: 6px; text-align: center; display: inline-block;">Reject</a>
+                </div>
+                """
             html += "</div>"
+
+        # Render tasks (new)
+        for t_id, cat, tx_id, details_json, explanation, accept_desc, reject_desc in tasks:
+            details = json.loads(details_json) if details_json else {}
+            tx_details = ""
+            if "transaction" in details:
+                t = details["transaction"]
+                tx_details = f"<div style='font-size:0.85rem; background:rgba(0,0,0,0.2); padding:8px; border-radius:6px; margin-bottom:10px;'><strong style='color:var(--accent-purple);'>Transaction:</strong> Date: {t.get('date')} | Payee: {t.get('payee')} | Amount: ${t.get('amount')} | Category: {t.get('category')} | Account: {t.get('account')}</div>"
+            elif "source_transaction" in details:
+                s = details["source_transaction"]
+                t = details.get("target_transaction") or {}
+                tx_details = f"<div style='font-size:0.85rem; background:rgba(0,0,0,0.2); padding:8px; border-radius:6px; margin-bottom:10px;'><strong style='color:var(--accent-blue);'>Source:</strong> Date: {s.get('date')} | Payee: {s.get('payee')} | Amount: ${s.get('amount')} | Category: {s.get('category')} | Account: {s.get('account')}<br/><strong style='color:var(--accent-purple);'>Target:</strong> Date: {t.get('date')} | Payee: {t.get('payee')} | Amount: {t.get('amount')} | Category: {t.get('category')} | Account: {t.get('account')}</div>"
+                
+            html += f"""
+            <div class='queue-item'>
+                <div class='queue-header'>
+                    <span class='tx-payee' style='color: var(--accent-purple); font-size: 1.1rem;'>{cat}</span>
+                    <span class='badge-state proposed'>Pending Action</span>
+                </div>
+                <div style='margin-bottom: 12px; font-size: 0.95rem; color: #d1d5db;'>{explanation}</div>
+                {tx_details}
+                
+                <div class='proposed-rule-box' style='font-size:0.85rem; border-left: 3px solid var(--accent-emerald); background: rgba(16, 185, 129, 0.05); margin-bottom:10px; color:#34d399;'>
+                    <strong>Accept:</strong> {accept_desc}
+                </div>
+                <div class='proposed-rule-box' style='font-size:0.85rem; border-left: 3px solid var(--accent-rose); background: rgba(244, 63, 94, 0.05); margin-bottom:15px; color:#f43f5e;'>
+                    <strong>Reject:</strong> {reject_desc}
+                </div>
+            """
+            
+            # Form for actions
+            html += f"""
+            <form action="/task-action" method="post" style="display: inline-flex; gap: 10px; width: auto; align-items: center;">
+                <input type="hidden" name="task_id" value="{t_id}" />
+            """
+            
+            # Show input text field if context input is needed
+            if cat in ("New Payee", "Unknown Retailer", "New Category", "Re-Authentication Required", "New Retailer"):
+                html += f"""
+                <input type="text" name="user_text" placeholder="Provide input..." required style="padding: 6px 12px; font-size:0.9rem; border-radius: 6px; width: 200px; background:#111827; border: 1px solid var(--border-color); color:white;" />
+                """
+                
+            html += """
+                <button type="submit" name="action" value="approve" class="btn-action approve" style="padding: 6px 16px; font-size: 0.85rem; border: none; cursor: pointer;">Accept</button>
+                <button type="submit" name="action" value="reject" class="btn-action reject" style="padding: 6px 16px; font-size: 0.85rem; border: none; cursor: pointer;">Reject</button>
+            </form>
+            </div>
+            """
 
     html += """</div>
             </div>
@@ -884,6 +944,922 @@ def export_rules():
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=mapping_rules_export.csv"}
     )
+
+@app.post("/task-action")
+def handle_task_action(task_id: int = Form(...), action: str = Form(...), user_text: str = Form(None)):
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT category, transaction_id, details, explanation, accept_changes, reject_changes FROM task_queue WHERE id = ?", (task_id,))
+        row = cursor.fetchone()
+        if not row:
+            return RedirectResponse(url="/", status_code=303)
+            
+        category, tx_id, details_json, explanation, accept_desc, reject_desc = row
+        details = json.loads(details_json) if details_json else {}
+        
+        if action == "approve":
+            # Execute accept logic depending on category
+            if category == "Bill Attachment":
+                cursor.execute("UPDATE raw_transactions SET writeback_status = 'SUCCESS' WHERE id = ?", (tx_id,))
+                database.log_change_audit(conn, "Quicken Simplifi", "BILL_ATTACH", f"Attached bill: {accept_desc}", transaction_id=tx_id, task_id=task_id)
+            elif category == "Bill Addition":
+                payee = details.get("transaction", {}).get("payee")
+                if payee:
+                    cursor.execute("INSERT INTO permanent_mapping_rules (keyword_pattern, target_category, target_bill_name) VALUES (?, 'Bills', ?)", (payee, payee))
+                    rule_id = cursor.lastrowid
+                    database.log_change_audit(conn, "Rule Mapping", "RULE_CREATE", f"Created bill addition rule: {payee}", rule_id=rule_id, transaction_id=tx_id, task_id=task_id)
+            elif category == "Transfer Attachment":
+                cursor.execute("UPDATE raw_transactions SET writeback_status = 'SUCCESS' WHERE id = ?", (tx_id,))
+                recip_id = details.get("target_transaction", {}).get("id")
+                if recip_id:
+                    cursor.execute("UPDATE raw_transactions SET writeback_status = 'SUCCESS' WHERE id = ?", (recip_id,))
+                database.log_change_audit(conn, "Quicken Simplifi", "TRANSFER_LINK", f"Linked transfer source {tx_id} and target {recip_id}", transaction_id=tx_id, task_id=task_id)
+            elif category in ("New Payee", "Unknown Retailer", "New Category"):
+                input_val = user_text or "General"
+                if category == "New Payee":
+                    cursor.execute("UPDATE raw_transactions SET payee = ? WHERE id = ?", (input_val, tx_id))
+                    database.log_change_audit(conn, "Quicken Simplifi", "PAYEE_UPDATE", f"Updated payee to {input_val}", transaction_id=tx_id, task_id=task_id)
+                elif category == "New Category":
+                    cursor.execute("UPDATE raw_transactions SET category = ? WHERE id = ?", (input_val, tx_id))
+                    payee = details.get("transaction", {}).get("payee")
+                    if payee:
+                        cursor.execute("INSERT INTO permanent_mapping_rules (keyword_pattern, target_category) VALUES (?, ?)", (payee, input_val))
+                    database.log_change_audit(conn, "Rule Mapping", "RULE_CREATE", f"Created category rule: {payee} -> {input_val}", transaction_id=tx_id, task_id=task_id)
+            elif category == "Expense Split":
+                cursor.execute("UPDATE raw_transactions SET category = 'Split / Mixed' WHERE id = ?", (tx_id,))
+                database.log_change_audit(conn, "Quicken Simplifi", "TRANSACTION_SPLIT", f"Split expense: {accept_desc}", transaction_id=tx_id, task_id=task_id)
+            elif category == "Personal Payment":
+                cursor.execute("UPDATE raw_transactions SET category = 'Transfer (no account)' WHERE id = ?", (tx_id,))
+                database.log_change_audit(conn, "Quicken Simplifi", "PERSONAL_PAYMENT", "Mapped personal payment to Transfer (no account)", transaction_id=tx_id, task_id=task_id)
+            elif category == "Bank Payment":
+                cursor.execute("UPDATE raw_transactions SET category = 'Interest Income' WHERE id = ?", (tx_id,))
+                database.log_change_audit(conn, "Quicken Simplifi", "BANK_PAYMENT", "Mapped interest payment to Interest Income", transaction_id=tx_id, task_id=task_id)
+            else:
+                cursor.execute("UPDATE raw_transactions SET writeback_status = 'SUCCESS' WHERE id = ?", (tx_id,))
+                database.log_change_audit(conn, "Core Process", "TASK_RESOLVE", f"Resolved task {task_id}: {category}", transaction_id=tx_id, task_id=task_id)
+                
+            cursor.execute("UPDATE task_queue SET status = 'APPROVED' WHERE id = ?", (task_id,))
+            
+        elif action == "reject":
+            database.log_change_audit(conn, "Core Process", "TASK_REJECT", f"Rejected task {task_id}: {category}", transaction_id=tx_id, task_id=task_id)
+            cursor.execute("UPDATE task_queue SET status = 'REJECTED' WHERE id = ?", (task_id,))
+            
+        conn.commit()
+        return RedirectResponse(url="/", status_code=303)
+    finally:
+        conn.close()
+
+def get_safe_db_path(db_name: str):
+    db_name = os.path.basename(db_name)
+    if not db_name.endswith(".db"):
+        raise HTTPException(status_code=400, detail="Invalid database extension")
+    base_dir = os.path.dirname(os.path.abspath(DB_PATH))
+    full_path = os.path.join(base_dir, db_name)
+    if not os.path.exists(full_path):
+        raise HTTPException(status_code=404, detail="Database file not found")
+    return full_path
+
+@app.get("/db-viewer/api/databases")
+def db_viewer_databases():
+    db_dir = os.path.dirname(os.path.abspath(DB_PATH))
+    dbs = [f for f in os.listdir(db_dir) if f.endswith(".db")]
+    return dbs
+
+@app.get("/db-viewer/api/tables")
+def db_viewer_tables(db: str):
+    db_path = get_safe_db_path(db)
+    conn = sqlite3.connect(db_path)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = [row[0] for row in cursor.fetchall() if not row[0].startswith("sqlite_")]
+        return tables
+    finally:
+        conn.close()
+
+@app.get("/db-viewer/api/data")
+def db_viewer_data(db: str, table: str):
+    db_path = get_safe_db_path(db)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        cursor = conn.cursor()
+        
+        # Get columns
+        cursor.execute(f"PRAGMA table_info('{table}')")
+        cols_raw = cursor.fetchall()
+        columns = []
+        pk_col = None
+        for c in cols_raw:
+            columns.append({
+                "name": c["name"],
+                "type": c["type"],
+                "pk": c["pk"] > 0
+            })
+            if c["pk"] > 0:
+                pk_col = c["name"]
+                
+        if not pk_col and columns:
+            pk_col = columns[0]["name"]
+            
+        # Get foreign keys list
+        cursor.execute(f"PRAGMA foreign_key_list('{table}')")
+        fks_raw = cursor.fetchall()
+        fks = {}
+        for f in fks_raw:
+            fks[f["from"]] = {
+                "table": f["table"],
+                "to": f["to"]
+            }
+            
+        # Get all rows
+        cursor.execute(f"SELECT * FROM '{table}'")
+        rows_raw = cursor.fetchall()
+        rows = []
+        
+        fk_choices = {}
+        
+        for r in rows_raw:
+            row_dict = {}
+            for c in columns:
+                col_name = c["name"]
+                val = r[col_name]
+                
+                if col_name in fks:
+                    fk_info = fks[col_name]
+                    ref_table = fk_info["table"]
+                    ref_to = fk_info["to"]
+                    
+                    # Fetch target row if FK has value
+                    ref_row = None
+                    if val is not None:
+                        cursor.execute(f"SELECT * FROM '{ref_table}' WHERE {ref_to} = ?", (val,))
+                        ref_row_raw = cursor.fetchone()
+                        if ref_row_raw:
+                            ref_row = dict(ref_row_raw)
+                            
+                    row_dict[col_name] = {
+                        "value": val,
+                        "is_fk": True,
+                        "ref_table": ref_table,
+                        "ref_to": ref_to,
+                        "resolved": ref_row
+                    }
+                    
+                    if ref_table not in fk_choices:
+                        cursor.execute(f"SELECT * FROM '{ref_table}'")
+                        fk_choices[ref_table] = [dict(choice) for choice in cursor.fetchall()]
+                else:
+                    row_dict[col_name] = {
+                        "value": val,
+                        "is_fk": False
+                    }
+            rows.append(row_dict)
+            
+        return {
+            "columns": columns,
+            "pk_col": pk_col,
+            "fks": fks,
+            "rows": rows,
+            "fk_choices": fk_choices
+        }
+    finally:
+        conn.close()
+
+@app.post("/db-viewer/api/edit")
+def db_viewer_edit(
+    db: str = Form(...),
+    table: str = Form(...),
+    pk_col: str = Form(...),
+    pk_val: str = Form(...),
+    col: str = Form(...),
+    val: str = Form(...)
+):
+    db_path = get_safe_db_path(db)
+    conn = sqlite3.connect(db_path)
+    try:
+        cursor = conn.cursor()
+        
+        cursor.execute(f"PRAGMA table_info('{table}')")
+        cols = cursor.fetchall()
+        col_type = "TEXT"
+        for c in cols:
+            if c[1] == col:
+                col_type = c[2].upper()
+                break
+                
+        validated_val = val
+        if val == "None" or val == "":
+            validated_val = None
+        else:
+            if "INT" in col_type:
+                try:
+                    validated_val = int(val)
+                except ValueError:
+                    raise HTTPException(status_code=400, detail=f"Column '{col}' requires an integer value")
+            elif "REAL" in col_type or "FLOAT" in col_type or "DOUBLE" in col_type:
+                try:
+                    validated_val = float(val)
+                except ValueError:
+                    raise HTTPException(status_code=400, detail=f"Column '{col}' requires a numeric value")
+                    
+        cursor.execute(f"UPDATE '{table}' SET {col} = ? WHERE {pk_col} = ?", (validated_val, pk_val))
+        conn.commit()
+        return {"status": "success"}
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
+
+@app.post("/db-viewer/api/fk-link")
+def db_viewer_fk_link(
+    db: str = Form(...),
+    table: str = Form(...),
+    pk_col: str = Form(...),
+    pk_val: str = Form(...),
+    col: str = Form(...),
+    target_val: str = Form(None),
+    action: str = Form(...)
+):
+    db_path = get_safe_db_path(db)
+    conn = sqlite3.connect(db_path)
+    try:
+        cursor = conn.cursor()
+        val = None if action == "delete" else target_val
+        cursor.execute(f"UPDATE '{table}' SET {col} = ? WHERE {pk_col} = ?", (val, pk_val))
+        conn.commit()
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
+
+@app.post("/db-viewer/api/delete")
+def db_viewer_delete(
+    db: str = Form(...),
+    table: str = Form(...),
+    pk_col: str = Form(...),
+    pk_val: str = Form(...)
+):
+    db_path = get_safe_db_path(db)
+    conn = sqlite3.connect(db_path)
+    try:
+        cursor = conn.cursor()
+        cursor.execute(f"DELETE FROM '{table}' WHERE {pk_col} = ?", (pk_val,))
+        conn.commit()
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
+
+@app.post("/db-viewer/api/add")
+def db_viewer_add(
+    db: str = Form(...),
+    table: str = Form(...),
+    row_data: str = Form(...)
+):
+    db_path = get_safe_db_path(db)
+    conn = sqlite3.connect(db_path)
+    try:
+        cursor = conn.cursor()
+        data = json.loads(row_data)
+        columns = list(data.keys())
+        values = list(data.values())
+        
+        col_placeholders = ", ".join([f"'{c}'" for c in columns])
+        val_placeholders = ", ".join(["?" for _ in values])
+        
+        cursor.execute(f"INSERT INTO '{table}' ({col_placeholders}) VALUES ({val_placeholders})", values)
+        conn.commit()
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
+
+@app.get("/db-viewer", response_class=HTMLResponse)
+def db_viewer():
+    html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Database Live Viewer</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0b0f19;
+            --card-bg: rgba(22, 28, 45, 0.7);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --text-primary: #f3f4f6;
+            --text-secondary: #9ca3af;
+            --accent-purple: #8b5cf6;
+            --accent-blue: #3b82f6;
+            --accent-emerald: #10b981;
+            --accent-rose: #f43f5e;
+            --glass-shine: rgba(255, 255, 255, 0.03);
+        }
+        
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            font-family: 'Outfit', sans-serif;
+            padding: 40px 20px;
+            background-image: 
+                radial-gradient(circle at 10% 20%, rgba(139, 92, 246, 0.05) 0%, transparent 40%),
+                radial-gradient(circle at 90% 80%, rgba(59, 130, 246, 0.05) 0%, transparent 40%);
+            background-attachment: fixed;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        header {
+            margin-bottom: 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 20px;
+        }
+        
+        h1 {
+            font-size: 2.2rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, #a78bfa 0%, #60a5fa 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        .section-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 24px;
+            backdrop-filter: blur(12px);
+            margin-bottom: 30px;
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+        }
+        
+        select, input, button {
+            font-family: inherit;
+            font-size: 1rem;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            padding: 10px 14px;
+            background: #111827;
+            color: white;
+            outline: none;
+        }
+        
+        select:focus, input:focus {
+            border-color: var(--accent-purple);
+        }
+        
+        button {
+            cursor: pointer;
+            font-weight: 600;
+            background: var(--accent-purple);
+            color: white;
+            border: none;
+            transition: opacity 0.2s;
+        }
+        
+        button:hover {
+            opacity: 0.9;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+            text-align: left;
+        }
+        
+        th, td {
+            padding: 14px;
+            border-bottom: 1px solid var(--border-color);
+        }
+        
+        th {
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            font-size: 0.8rem;
+            font-weight: 600;
+            letter-spacing: 0.05em;
+        }
+        
+        td {
+            color: #d1d5db;
+        }
+        
+        .fk-embedded {
+            background: rgba(59, 130, 246, 0.08);
+            border: 1px solid rgba(59, 130, 246, 0.2);
+            border-radius: 6px;
+            padding: 10px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            display: inline-block;
+            max-width: 250px;
+            transition: all 0.2s;
+        }
+        
+        .fk-embedded:hover {
+            border-color: var(--accent-blue);
+            background: rgba(59, 130, 246, 0.15);
+        }
+        
+        .fk-embedded table {
+            margin-top: 6px;
+            font-size: 0.75rem;
+        }
+        
+        .fk-embedded th {
+            font-size: 0.7rem;
+            padding: 2px 4px;
+            color: var(--text-secondary);
+        }
+        
+        .fk-embedded td {
+            padding: 2px 4px;
+            color: white;
+        }
+        
+        .fk-title {
+            font-weight: 700;
+            color: var(--accent-blue);
+            text-transform: uppercase;
+            font-size: 0.75rem;
+            display: flex;
+            justify-content: space-between;
+        }
+        
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.7);
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+            backdrop-filter: blur(4px);
+        }
+        
+        .modal-content {
+            background: #161c2d;
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 30px;
+            width: 90%;
+            max-width: 500px;
+            max-height: 80vh;
+            overflow-y: auto;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+        }
+        
+        .editable {
+            cursor: pointer;
+            border-bottom: 1px dashed rgba(255,255,255,0.2);
+        }
+        
+        .editable:hover {
+            background: rgba(255,255,255,0.03);
+        }
+        
+        .no-records {
+            text-align: center;
+            color: var(--text-secondary);
+            padding: 40px;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div>
+                <h1>Live Table Viewer</h1>
+                <p style="color: var(--text-secondary); margin-top: 4px;"><a href="/" style="color: var(--accent-purple); text-decoration: none; font-weight:600;">← Back to Control Panel</a></p>
+            </div>
+        </header>
+
+        <div class="section-card">
+            <div style="display: flex; gap: 20px; flex-wrap: wrap; align-items: center;">
+                <div style="display:flex; flex-direction:column; gap:6px;">
+                    <label style="font-size:0.85rem; color:var(--text-secondary);">Select Database:</label>
+                    <select id="db-select" onchange="loadTables()"></select>
+                </div>
+                <div style="display:flex; flex-direction:column; gap:6px;">
+                    <label style="font-size:0.85rem; color:var(--text-secondary);">Select Table:</label>
+                    <select id="table-select" onchange="loadTableData()"></select>
+                </div>
+                <div style="margin-top:20px;">
+                    <button onclick="showAddRowForm()">+ Add Row</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="section-card" id="table-container" style="overflow-x: auto;">
+            <p class="no-records">Select a database and table to load records.</p>
+        </div>
+    </div>
+
+    <!-- FK Link Modal -->
+    <div class="modal" id="fk-modal">
+        <div class="modal-content">
+            <h3 style="margin-bottom: 20px; color: var(--accent-blue);">Manage Foreign Key Link</h3>
+            <p style="color: var(--text-secondary); margin-bottom: 15px;">Link this cell to a record in referenced table:</p>
+            <input type="hidden" id="modal-fk-col" />
+            <input type="hidden" id="modal-pk-val" />
+            <select id="fk-target-select" style="width: 100%; margin-bottom: 20px;"></select>
+            <div style="display: flex; gap: 10px; justify-content: flex-end;">
+                <button onclick="closeModal()" style="background:#374151;">Cancel</button>
+                <button onclick="saveFkLink()" style="background: var(--accent-emerald);">Change/Add Link</button>
+                <button onclick="deleteFkLink()" style="background: var(--accent-rose);">Delete Link</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add Row Modal -->
+    <div class="modal" id="add-row-modal">
+        <div class="modal-content">
+            <h3 style="margin-bottom: 20px; color: var(--accent-purple);">Add New Row</h3>
+            <form id="add-row-form" style="display: flex; flex-direction: column; gap: 15px;" onsubmit="submitNewRow(event)">
+                <div id="add-row-inputs" style="display:flex; flex-direction:column; gap:12px;"></div>
+                <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top:15px;">
+                    <button type="button" onclick="closeAddRowModal()" style="background:#374151;">Cancel</button>
+                    <button type="submit" style="background: var(--accent-purple);">Insert Row</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        let currentColumns = [];
+        let currentPk = '';
+        let currentChoices = {};
+
+        function fetchDatabases() {
+            fetch('/db-viewer/api/databases')
+                .then(r => r.json())
+                .then(dbs => {
+                    const select = document.getElementById('db-select');
+                    select.innerHTML = '';
+                    dbs.forEach(db => {
+                        const opt = document.createElement('option');
+                        opt.value = db;
+                        opt.innerText = db;
+                        select.appendChild(opt);
+                    });
+                    if (dbs.length > 0) loadTables();
+                });
+        }
+
+        function loadTables() {
+            const db = document.getElementById('db-select').value;
+            fetch(`/db-viewer/api/tables?db=${db}`)
+                .then(r => r.json())
+                .then(tables => {
+                    const select = document.getElementById('table-select');
+                    select.innerHTML = '';
+                    tables.forEach(t => {
+                        const opt = document.createElement('option');
+                        opt.value = t;
+                        opt.innerText = t;
+                        select.appendChild(opt);
+                    });
+                    if (tables.length > 0) loadTableData();
+                });
+        }
+
+        function loadTableData() {
+            const db = document.getElementById('db-select').value;
+            const table = document.getElementById('table-select').value;
+            if (!db || !table) return;
+
+            fetch(`/db-viewer/api/data?db=${db}&table=${table}`)
+                .then(r => r.json())
+                .then(res => {
+                    currentColumns = res.columns;
+                    currentPk = res.pk_col;
+                    currentChoices = res.fk_choices;
+
+                    const container = document.getElementById('table-container');
+                    if (res.rows.length === 0) {
+                        container.innerHTML = `<p class="no-records">No rows found in '${table}'.</p>`;
+                        return;
+                    }
+
+                    let html = '<table><thead><tr>';
+                    res.columns.forEach(col => {
+                        html += `<th>${col.name}<br/><span style="font-size:0.7rem; color:var(--text-secondary); text-transform:none;">${col.type}</span></th>`;
+                    });
+                    html += '<th>Actions</th></tr></thead><tbody>';
+
+                    res.rows.forEach(row => {
+                        const pkVal = row[currentPk]?.value;
+                        html += '<tr>';
+                        res.columns.forEach(col => {
+                            const cell = row[col.name];
+                            if (cell.is_fk) {
+                                const resolved = cell.resolved;
+                                const refTable = cell.ref_table;
+                                const refTo = cell.ref_to;
+                                let fkHtml = '';
+                                if (resolved) {
+                                    fkHtml = `<div class="fk-embedded" onclick="openFkLink('${col.name}', '${pkVal}', '${refTable}')">`;
+                                    fkHtml += `<div class="fk-title"><span>${col.name}</span> <span style="font-size:0.65rem; color:var(--accent-blue); opacity:0.7;">➔ ${refTable}</span></div>`;
+                                    fkHtml += '<table><thead><tr>';
+                                    Object.keys(resolved).forEach(k => {
+                                        fkHtml += `<th>${k}</th>`;
+                                    });
+                                    fkHtml += '</tr></thead><tbody><tr>';
+                                    Object.values(resolved).forEach(v => {
+                                        fkHtml += `<td>${v !== null ? v : ''}</td>`;
+                                    });
+                                    fkHtml += '</tr></tbody></table></div>';
+                                } else {
+                                    fkHtml = `<button onclick="openFkLink('${col.name}', '${pkVal}', '${refTable}')" style="font-size:0.75rem; padding: 4px 8px; background:var(--accent-blue);">Change/Add Link</button>`;
+                                }
+                                html += `<td>${fkHtml}</td>`;
+                            } else {
+                                if (col.pk) {
+                                    html += `<td><strong>${cell.value}</strong></td>`;
+                                } else {
+                                    html += `<td class="editable" data-col="${col.name}" data-pk="${pkVal}" data-type="${col.type}" onclick="startEdit(this)">${cell.value !== null ? cell.value : ''}</td>`;
+                                }
+                            }
+                        });
+                        html += `<td><button style="background:var(--accent-rose); font-size:0.8rem; padding: 6px 10px;" onclick="deleteRow('${pkVal}')">Delete</button></td>`;
+                        html += '</tr>';
+                    });
+
+                    html += '</tbody></table>';
+                    container.innerHTML = html;
+                });
+        }
+
+        function startEdit(cell) {
+            if (cell.querySelector('input')) return;
+            const originalVal = cell.innerText;
+            const type = cell.getAttribute('data-type');
+            
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.value = originalVal;
+            input.style.width = '100%';
+            input.style.padding = '4px 8px';
+            input.style.fontSize = 'inherit';
+            input.style.background = '#1f2937';
+            input.style.color = 'white';
+            
+            cell.innerHTML = '';
+            cell.appendChild(input);
+            input.focus();
+
+            function commitChange() {
+                const newVal = input.value;
+                if (newVal === originalVal) {
+                    cell.innerHTML = originalVal;
+                    return;
+                }
+                
+                // Strict validation before API call
+                if (type.includes('INT')) {
+                    if (newVal !== '' && isNaN(parseInt(newVal))) {
+                        alert("Validation error: Value must be an integer.");
+                        cell.innerHTML = originalVal;
+                        return;
+                    }
+                } else if (type.includes('REAL') || type.includes('FLOAT') || type.includes('DOUBLE')) {
+                    if (newVal !== '' && isNaN(parseFloat(newVal))) {
+                        alert("Validation error: Value must be a float.");
+                        cell.innerHTML = originalVal;
+                        return;
+                    }
+                }
+
+                const db = document.getElementById('db-select').value;
+                const table = document.getElementById('table-select').value;
+                const col = cell.getAttribute('data-col');
+                const pkVal = cell.getAttribute('data-pk');
+
+                const fd = new FormData();
+                fd.append('db', db);
+                fd.append('table', table);
+                fd.append('pk_col', currentPk);
+                fd.append('pk_val', pkVal);
+                fd.append('col', col);
+                fd.append('val', newVal);
+
+                fetch('/db-viewer/api/edit', { method: 'POST', body: fd })
+                    .then(r => {
+                        if (!r.ok) return r.json().then(e => { throw new Error(e.detail) });
+                        return r.json();
+                    })
+                    .then(() => {
+                        cell.innerHTML = newVal;
+                    })
+                    .catch(err => {
+                        alert("Save failed: " + err.message);
+                        cell.innerHTML = originalVal;
+                    });
+            }
+
+            input.onblur = commitChange;
+            input.onkeydown = function(e) {
+                if (e.key === 'Enter') commitChange();
+                if (e.key === 'Escape') cell.innerHTML = originalVal;
+            };
+        }
+
+        function openFkLink(colName, pkVal, refTable) {
+            document.getElementById('modal-fk-col').value = colName;
+            document.getElementById('modal-pk-val').value = pkVal;
+            
+            const choices = currentChoices[refTable] || [];
+            const select = document.getElementById('fk-target-select');
+            select.innerHTML = '<option value="">-- Select target record --</option>';
+            choices.forEach(ch => {
+                const opt = document.createElement('option');
+                opt.value = ch.id || Object.values(ch)[0];
+                opt.innerText = JSON.stringify(ch);
+                select.appendChild(opt);
+            });
+            
+            document.getElementById('fk-modal').style.display = 'flex';
+        }
+
+        function closeModal() {
+            document.getElementById('fk-modal').style.display = 'none';
+        }
+
+        function saveFkLink() {
+            const db = document.getElementById('db-select').value;
+            const table = document.getElementById('table-select').value;
+            const col = document.getElementById('modal-fk-col').value;
+            const pkVal = document.getElementById('modal-pk-val').value;
+            const targetVal = document.getElementById('fk-target-select').value;
+
+            const fd = new FormData();
+            fd.append('db', db);
+            fd.append('table', table);
+            fd.append('pk_col', currentPk);
+            fd.append('pk_val', pkVal);
+            fd.append('col', col);
+            fd.append('target_val', targetVal);
+            fd.append('action', 'change');
+
+            fetch('/db-viewer/api/fk-link', { method: 'POST', body: fd })
+                .then(r => r.json())
+                .then(() => {
+                    closeModal();
+                    loadTableData();
+                });
+        }
+
+        function deleteFkLink() {
+            const db = document.getElementById('db-select').value;
+            const table = document.getElementById('table-select').value;
+            const col = document.getElementById('modal-fk-col').value;
+            const pkVal = document.getElementById('modal-pk-val').value;
+
+            const fd = new FormData();
+            fd.append('db', db);
+            fd.append('table', table);
+            fd.append('pk_col', currentPk);
+            fd.append('pk_val', pkVal);
+            fd.append('col', col);
+            fd.append('action', 'delete');
+
+            fetch('/db-viewer/api/fk-link', { method: 'POST', body: fd })
+                .then(r => r.json())
+                .then(() => {
+                    closeModal();
+                    loadTableData();
+                });
+        }
+
+        function deleteRow(pkVal) {
+            if (!confirm("Are you sure you want to delete this row?")) return;
+            const db = document.getElementById('db-select').value;
+            const table = document.getElementById('table-select').value;
+
+            const fd = new FormData();
+            fd.append('db', db);
+            fd.append('table', table);
+            fd.append('pk_col', currentPk);
+            fd.append('pk_val', pkVal);
+
+            fetch('/db-viewer/api/delete', { method: 'POST', body: fd })
+                .then(r => r.json())
+                .then(() => {
+                    loadTableData();
+                });
+        }
+
+        function showAddRowForm() {
+            const inputsContainer = document.getElementById('add-row-inputs');
+            inputsContainer.innerHTML = '';
+            
+            currentColumns.forEach(col => {
+                if (col.pk && col.type.includes('INT')) return;
+                
+                const fieldDiv = document.createElement('div');
+                fieldDiv.style.display = 'flex';
+                fieldDiv.style.flexDirection = 'column';
+                fieldDiv.style.gap = '4px';
+                
+                const label = document.createElement('label');
+                label.innerText = `${col.name} (${col.type}):`;
+                label.style.fontSize = '0.85rem';
+                label.style.color = 'var(--text-secondary)';
+                fieldDiv.appendChild(label);
+                
+                const input = document.createElement('input');
+                input.type = 'text';
+                input.name = col.name;
+                input.setAttribute('data-type', col.type);
+                fieldDiv.appendChild(input);
+                
+                inputsContainer.appendChild(fieldDiv);
+            });
+            
+            document.getElementById('add-row-modal').style.display = 'flex';
+        }
+
+        function closeAddRowModal() {
+            document.getElementById('add-row-modal').style.display = 'none';
+        }
+
+        function submitNewRow(e) {
+            e.preventDefault();
+            const db = document.getElementById('db-select').value;
+            const table = document.getElementById('table-select').value;
+            
+            const inputs = document.getElementById('add-row-inputs').querySelectorAll('input');
+            const data = {};
+            
+            for (let i = 0; i < inputs.length; i++) {
+                const inp = inputs[i];
+                const type = inp.getAttribute('data-type');
+                const val = inp.value.trim();
+                
+                if (val !== '') {
+                    if (type.includes('INT')) {
+                        if (isNaN(parseInt(val))) {
+                            alert(`Validation error: Column '${inp.name}' must be an integer.`);
+                            return;
+                        }
+                        data[inp.name] = parseInt(val);
+                    } else if (type.includes('REAL') || type.includes('FLOAT') || type.includes('DOUBLE')) {
+                        if (isNaN(parseFloat(val))) {
+                            alert(`Validation error: Column '${inp.name}' must be a float.`);
+                            return;
+                        }
+                        data[inp.name] = parseFloat(val);
+                    } else {
+                        data[inp.name] = val;
+                    }
+                }
+            }
+
+            const fd = new FormData();
+            fd.append('db', db);
+            fd.append('table', table);
+            fd.append('row_data', JSON.stringify(data));
+
+            fetch('/db-viewer/api/add', { method: 'POST', body: fd })
+                .then(r => r.json())
+                .then(() => {
+                    closeAddRowModal();
+                    loadTableData();
+                });
+        }
+
+        fetchDatabases();
+    </script>
+</body>
+</html>"""
+    return html
 
 @app.get("/setup", response_class=HTMLResponse)
 def setup_wizard():

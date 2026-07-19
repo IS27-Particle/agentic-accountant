@@ -5,7 +5,8 @@
     "forma_hsa_sync",
     "digital_receipts_sync",
     "gemini_reconciliation_engine",
-    "quicken_bill_manager"
+    "quicken_bill_manager",
+    "monarch_money_sync"
   ],
   "quicken_simplifi_sync": {
     "steps": [
@@ -115,6 +116,35 @@
         "search_input_selector": "input[placeholder='Search transactions...']",
         "confirm_button_selector": "button:has-text('Confirm Link')",
         "cancel_button_selector": "button:has-text('Cancel')"
+      }
+    ]
+  },
+  "monarch_money_sync": {
+    "steps": [
+      {
+        "action": "goto",
+        "url": "https://app.monarchmoney.com/login"
+      },
+      {
+        "action": "wait_for_selector",
+        "selector": "table, .transactions, .ledger"
+      },
+      {
+        "action": "scrape_transactions",
+        "row_selector": "tr, .transaction-row",
+        "columns": {
+          "date": "td.date",
+          "payee": "td.payee",
+          "amount": "td.amount",
+          "category": "td.category",
+          "account": "td.account"
+        }
+      },
+      {
+        "action": "imap_sync"
+      },
+      {
+        "action": "run_reconciliation_logic"
       }
     ]
   }

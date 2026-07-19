@@ -27,14 +27,17 @@ def init_db(conn=None):
             amount REAL,
             category TEXT,
             account TEXT,
-            writeback_status TEXT DEFAULT 'PENDING'
+            writeback_status TEXT DEFAULT 'PENDING',
+            cleared TEXT DEFAULT 'CLEARED'
         )
     """)
-    # Migration: Add writeback_status column if it doesn't exist in an existing table
+    # Migration: Add writeback_status and cleared columns if they don't exist in an existing table
     cursor.execute("PRAGMA table_info(raw_transactions)")
     columns = [row[1] for row in cursor.fetchall()]
     if columns and "writeback_status" not in columns:
         cursor.execute("ALTER TABLE raw_transactions ADD COLUMN writeback_status TEXT DEFAULT 'PENDING'")
+    if columns and "cleared" not in columns:
+        cursor.execute("ALTER TABLE raw_transactions ADD COLUMN cleared TEXT DEFAULT 'CLEARED'")
     
     # 2. family_context
     cursor.execute("""
@@ -183,6 +186,38 @@ def init_db(conn=None):
         )
     """)
     
+    # 16. task_queue
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS task_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT,
+            transaction_id TEXT,
+            details TEXT,
+            explanation TEXT,
+            accept_changes TEXT,
+            reject_changes TEXT,
+            status TEXT DEFAULT 'PENDING',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # 17. change_audit
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS change_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            target_app TEXT,
+            change_type TEXT,
+            details TEXT,
+            rule_id INTEGER,
+            transaction_id TEXT,
+            task_id INTEGER,
+            FOREIGN KEY(rule_id) REFERENCES permanent_mapping_rules(id),
+            FOREIGN KEY(transaction_id) REFERENCES raw_transactions(id),
+            FOREIGN KEY(task_id) REFERENCES task_queue(id)
+        )
+    """)
+    
     conn.commit()
     if should_close:
         conn.close()
@@ -232,6 +267,14 @@ def flag_for_manual_export(conn, account_name):
         INSERT INTO audit_log (module_name, status, details)
         VALUES (?, 'EXPORT_SCHEDULED', ?)
     """, (account_name, f"Scraping failed, scheduled manual export for {account_name}"))
+    conn.commit()
+
+def log_change_audit(conn, target_app, change_type, details, rule_id=None, transaction_id=None, task_id=None):
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO change_audit (target_app, change_type, details, rule_id, transaction_id, task_id)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (target_app, change_type, details, rule_id, transaction_id, task_id))
     conn.commit()
 
 if __name__ == "__main__":

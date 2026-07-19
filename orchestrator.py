@@ -375,6 +375,15 @@ def run_pipeline():
                 database.flag_for_manual_export(conn, node)
         
         browser.close()
+        
+    try:
+        print("Running transaction validation pipeline...")
+        import validation
+        validation.run_validation_pipeline(conn)
+    except Exception as v_err:
+        print(f"Error running transaction validation pipeline: {v_err}")
+        traceback.print_exc()
+        
     conn.close()
 
 if __name__ == "__main__":
