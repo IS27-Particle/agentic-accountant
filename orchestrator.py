@@ -7,7 +7,7 @@ import sys
 import shutil
 import sqlite3
 import traceback
-from google import genai
+import llm_router
 from playwright.sync_api import sync_playwright
 
 # --- Local Dotenv Loader Utility ---
@@ -133,10 +133,10 @@ def batch_categorize_transactions(transactions):
             categorized.append({"id": tx.get("id"), "category": matched_cat})
         return categorized
         
-    client = genai.Client(api_key=api_key)
+    # Connected via local llm_router
     prompt = f"Categorize these {len(transactions)} transactions into standard financial categories: {json.dumps(transactions)}. Return a JSON array of objects with 'id' and 'category' keys."
     
-    response = client.models.generate_content(model=get_model("routine"), contents=prompt).text
+    response = llm_router.generate_text(prompt)
     try:
         cleaned = response.strip()
         if cleaned.startswith("```"):
@@ -203,7 +203,7 @@ def attempt_self_healing(node, error_traceback):
         with open(interpreter_path, "r", encoding="utf-8") as f:
             interpreter_code = f.read()
             
-        client = genai.Client(api_key=api_key)
+        # Connected via local llm_router
         prompt = f"""
 You are the self-healing engine of the Declarative Agentic Accountant.
 An error has occurred during the execution of module '{node}'. This could be caused by:

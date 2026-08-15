@@ -8,7 +8,7 @@ import requests
 import hashlib
 import random
 from email.header import decode_header
-from google import genai
+import llm_router
 
 def stable_hash(text):
     return hashlib.sha256(text.encode('utf-8')).hexdigest()[:16]
@@ -279,13 +279,13 @@ class UniversalInterfaceEngine:
                         if review_state[0] == "INPUT_PROVIDED":
                             api_key = os.environ.get("GEMINI_API_KEY")
                             if api_key:
-                                client = genai.Client(api_key=api_key)
+                                # Connected via local llm_router
                                 cursor.execute("SELECT content FROM family_context")
                                 fam_notes = " ".join([r[0] for r in cursor.fetchall()])
                                 cursor.execute("SELECT value FROM benefits_status")
                                 ben_notes = " ".join([r[0] for r in cursor.fetchall()])
                                 prompt = "Payee: " + payee + " | Amount: " + str(amount) + " | Input: " + str(review_state[1] or '') + " | Context: " + fam_notes + " " + ben_notes + "\nGenerate mapping string format:\nPattern: [keyword] | Category: [Name] | Bill: [Name]"
-                                response = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+                                response = type('Obj', (object,), {'text': llm_router.generate_text(prompt)})()
                                 proposed = response.text.strip()
                             else:
                                 print("GEMINI_API_KEY not set. Using local mock rule generation.")
@@ -316,7 +316,7 @@ class UniversalInterfaceEngine:
                                 print("Writeback failed for item " + tx_id + " with error: " + str(wb_err))
                     api_key = os.environ.get("GEMINI_API_KEY")
                     if api_key:
-                        client = genai.Client(api_key=api_key)
+                        # Connected via local llm_router
                         cursor.execute("SELECT date, payee, amount, category FROM raw_transactions ORDER BY date DESC LIMIT 50")
                         tx_data = json.dumps(cursor.fetchall())
                         cursor.execute("SELECT content FROM family_context")
